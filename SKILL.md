@@ -1,6 +1,6 @@
 ---
 name: sharepoint-stream-video-download
-description: 从 SharePoint / OneDrive 上的 Stream 视频页面（stream.aspx）下载视频文件。当页面提示无下载权限、直接下载返回 403/「拒绝访问」时，改用播放器的转码 DASH 流（抓分段 + AES-128 解密 + ffmpeg 合流）拿到完整视频。触发词：SharePoint 视频下载、Stream 下载、stream.aspx、会议录制下载、「下载这个视频但没权限」。
+description: 从 SharePoint / OneDrive 上的 Stream 视频页面（stream.aspx）下载视频文件，以及提取页面上渲染的转录/字幕文本。当页面提示无下载权限、直接下载返回 403/「拒绝访问」时，视频改用播放器的转码 DASH 流（抓分段 + AES-128 解密 + ffmpeg 合流）；转录改用滚动采集虚拟列表 DOM。触发词：SharePoint 视频下载、Stream 下载、stream.aspx、会议录制下载、转录文本、字幕导出、会议记录转录、「下载这个视频但没权限」。
 agent_created: true
 ---
 
@@ -81,6 +81,38 @@ https://<tenant>-my.sharepoint.com/personal/<user>/_layouts/15/download.aspx?Sou
 - **命令结束后启动的 GUI 进程会被沙箱回收**。浏览器必须在后台常驻任务内启动。
 - 会话会随进程结束而丢失，因此**登录态要落到磁盘**（`launch_persistent_context(user_data_dir=...)`
   或 `storage_state`），并在同一次运行内完成全部下载。
+
+## 顺带拿转录文本（同一页面）
+
+页面上的「下载」按钮对转录通常也是无权限的（提示「你没有权限，无法下载口述文本」），
+而且 `/cdnmedia/transcripts?cTag=...` 虽然返回 200 / `application/json`，**正文是加密的二进制**
+（首字节 `03 2c 8b 59`，不是 gzip；gzip/zlib/deflate 都解不开），加 `format=vtt|json|text`
+参数也没用——浏览器是解密后才渲染的。
+
+**可靠做法：抓已渲染的转录面板 DOM**，用 [scripts/stream_transcript.py](scripts/stream_transcript.py)：
+
+```bash
+<venv>/Scripts/python.exe scripts/stream_transcript.py \
+    --url "<stream.aspx 完整地址>" --outdir "D:\out" --name "my-meeting" \
+    --profile "C:\Users\<you>\.agent-browser\profiles\cloak-sharepoint"
+```
+
+要点：
+
+- 转录面板是**虚拟滚动列表**，只会渲染视口内的条目，必须边滚边采。
+- 每个条目：`div[data-automationid="ListCell"][data-list-index="N"]`，**用 `data-list-index` 去重排序**。
+  不要用元素 y 坐标当 key——布局抖动会产生重复。
+- 总条数看 `sub-entry` 上的 `aria-setsize`。
+- 字段：
+  - 说话人 `span[class*="itemDisplayName"]`
+  - 时钟 `span[id^="Header-timestamp"]`（只在换说话人时渲染）
+  - 中文时间 `span[id^="timestampSpeakerAriaLabel"]`（每个条目都有，优先用它解析）
+  - 正文 `div[id^="sub-entry"]`
+  - 事件条目（「已开始听录」/「停止的脚本」）的说话人在 `p[class*="eventSpeakerName"]`
+- 滚动策略：步长 0.5 × `clientHeight`，每步采一次，直到
+  `scrollTop >= scrollHeight - clientHeight`；最后再强制滚到底补一次。
+  本例 30678px 内容 / 195 步采满 559 条，无缺号。
+- 输出 txt / md / vtt / json 四种格式。
 
 ## 校验产物
 
